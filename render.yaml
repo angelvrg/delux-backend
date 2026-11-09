@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: delux-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SUPABASE_URL
+        value: https://gfhbmqpdxrsaueggnfhb.supabase.co
+      - key: SUPABASE_KEY
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmaGJtcXBkeHJzYXVlZ2duZmhiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQxOTE4MDYsImV4cCI6MjEwOTc2NzgwNn0.FgMxP_DA5-kHkzrEJEXffbObP21EgEIKvqeuBMmWV04
