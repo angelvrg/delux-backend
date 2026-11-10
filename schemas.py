@@ -27,7 +27,7 @@ class LoginSolicitud(BaseModel):
 class MaterialBase(BaseModel):
     nombre: str = Field(..., description="Nombre del material")
     descripcion: Optional[str] = Field(None, description="Acabado o descripción")
-    foto_url: str = Field(..., description="URL de la foto en Supabase Storage")
+    foto_url: Optional[str] = Field(default="", description="URL de la foto en Supabase Storage")
     largo: float = Field(..., gt=0, description="Largo en metros")
     ancho: float = Field(..., gt=0, description="Ancho en metros")
     espesor: float = Field(..., gt=0, description="Espesor en centímetros")
