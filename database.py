@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = logging.getLogger("delux.db")
+registro = logging.getLogger("delux.bd")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://gfhbmqpdxrsaueggnfhb.supabase.co").strip()
 SUPABASE_KEY = os.getenv(
@@ -13,22 +13,31 @@ SUPABASE_KEY = os.getenv(
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmaGJtcXBkeHJzYXVlZ2duZmhiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQxOTE4MDYsImV4cCI6MjEwOTc2NzgwNn0.FgMxP_DA5-kHkzrEJEXffbObP21EgEIKvqeuBMmWV04"
 ).strip()
 
-supabase_client: Optional[Any] = None
+cliente_supabase: Optional[Any] = None
 
 try:
-    from supabase import create_client, Client
+    from supabase import create_client
     if SUPABASE_URL and SUPABASE_KEY:
         try:
-            supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-            logger.info("Cliente de Supabase inicializado correctamente")
+            cliente_supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            registro.info("Supabase conectado")
         except Exception as e:
-            logger.error(f"Error conectando a Supabase: {e}")
-            supabase_client = None
+            registro.error(f"Error al conectar con Supabase: {e}")
+            cliente_supabase = None
     else:
-        logger.warning("SUPABASE_URL o SUPABASE_KEY no configuradas. La API operará en modo memoria/demo hasta configurar las variables de entorno.")
+        registro.warning("Faltan SUPABASE_URL o SUPABASE_KEY: modo demostración")
 except ImportError:
-    logger.warning("Librería 'supabase' no instalada en este entorno. Operando en modo memoria/demo.")
-    supabase_client = None
+    registro.warning("Librería 'supabase' no instalada: modo demostración")
+    create_client = None
 
-def get_supabase() -> Optional[Any]:
-    return supabase_client
+
+def obtener_supabase() -> Optional[Any]:
+    """Devuelve el cliente compartido de Supabase (o None en modo demo)."""
+    return cliente_supabase
+
+
+def crear_cliente_auth() -> Optional[Any]:
+    """Cliente nuevo por solicitud, para que el login no altere la sesión del compartido."""
+    if create_client is None or not (SUPABASE_URL and SUPABASE_KEY):
+        return None
+    return create_client(SUPABASE_URL, SUPABASE_KEY)

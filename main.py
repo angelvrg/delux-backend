@@ -1,25 +1,30 @@
-import os
 import uuid
 from typing import List
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from database import get_supabase, SUPABASE_URL
+from database import obtener_supabase, crear_cliente_auth
 from schemas import (
-    dump_model,
+    volcar_modelo,
+    RegistroSolicitud,
+    LoginSolicitud,
     MaterialCrear,
     MaterialRespuesta,
     CotizacionCrear,
-    CotizacionRespuesta
+    CotizacionRespuesta,
+    EstadoCotizacionSolicitud
 )
+
+NOMBRE_BUCKET = "fotos-materiales"
+ENLACE_VERIFICACION = "deluxapp://verificado"
 
 app = FastAPI(
     title="DE LUX - API de Mármoles y Piedras Finas",
-    description="API REST para la gestión de catálogo de materiales y cotizaciones en tiempo real.",
-    version="1.0.0"
+    description="API REST para el catálogo de materiales, cotizaciones y usuarios.",
+    version="1.1.0"
 )
 
-# Permitir CORS para Android Studio (emuladores y dispositivos físicos) y navegadores
+# Permite peticiones desde la app Android y navegadores
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,8 +33,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Memoria de respaldo si aún no se han configurado credenciales de Supabase
-_DEMO_MATERIALES = [
+# Datos de respaldo cuando Supabase no está configurado
+_MATERIALES_DEMO = [
     {
         "id": 1,
         "nombre": "Mármol Blanco Carrara",
@@ -64,39 +69,102 @@ _DEMO_MATERIALES = [
         "creado_en": datetime.utcnow()
     }
 ]
-_DEMO_COTIZACIONES = []
+_COTIZACIONES_DEMO = []
 
 
 @app.get("/", tags=["Estado"])
 def estado_api():
-    supabase = get_supabase()
+    supabase = obtener_supabase()
     return {
         "sistema": "DE LUX API",
         "estado": "operativo",
-        "modo_base_datos": "Supabase PostgreSQL" if supabase else "Modo local / demostración (esperando variables de Supabase)",
+        "modo_base_datos": "Supabase PostgreSQL" if supabase else "Modo demostración (sin Supabase)",
         "documentacion": "/docs"
     }
 
 
 # ========================================================
-# ENDPOINTS DE MATERIALES
+# AUTENTICACIÓN Y ROLES
+# ========================================================
+
+@app.post("/api/auth/registro", tags=["Autenticación"])
+def registrar_usuario(datos: RegistroSolicitud):
+    cliente = crear_cliente_auth()
+    if not cliente:
+        raise HTTPException(status_code=503, detail="Supabase no está configurado.")
+    try:
+        res = cliente.auth.sign_up({
+            "email": datos.correo,
+            "password": datos.password,
+            "options": {
+                "data": {"nombre": datos.nombre},
+                "email_redirect_to": ENLACE_VERIFICACION
+            }
+        })
+        if not res.user:
+            raise HTTPException(status_code=400, detail="No se pudo registrar el usuario.")
+        return {
+            "mensaje": "Te enviamos un enlace de confirmación a tu correo. Revisa tu bandeja de entrada.",
+            "user_id": res.user.id,
+            "correo": res.user.email
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error en el registro: {str(e)}")
+
+
+@app.post("/api/auth/login", tags=["Autenticación"])
+def iniciar_sesion(datos: LoginSolicitud):
+    cliente = crear_cliente_auth()
+    if not cliente:
+        raise HTTPException(status_code=503, detail="Supabase no está configurado.")
+    try:
+        res = cliente.auth.sign_in_with_password({
+            "email": datos.correo,
+            "password": datos.password
+        })
+        if not res.user or not res.session:
+            raise HTTPException(status_code=401, detail="Credenciales inválidas o correo sin verificar.")
+
+        # El rol lo asigna un trigger en la tabla 'perfiles'
+        perfil = cliente.table("perfiles").select("*").eq("id", res.user.id).single().execute()
+        return {
+            "mensaje": "Inicio de sesión exitoso",
+            "access_token": res.session.access_token,
+            "usuario": {
+                "id": res.user.id,
+                "correo": res.user.email,
+                "nombre": perfil.data.get("nombre", ""),
+                "rol": perfil.data.get("rol", "cliente")
+            }
+        }
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Credenciales incorrectas o aún no has verificado tu correo electrónico."
+        )
+
+
+# ========================================================
+# MATERIALES
 # ========================================================
 
 @app.get("/api/materiales", response_model=List[MaterialRespuesta], tags=["Materiales"])
 def listar_materiales():
-    supabase = get_supabase()
+    supabase = obtener_supabase()
     if supabase:
         try:
             res = supabase.table("materiales").select("*").order("creado_en", desc=True).execute()
             return res.data
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error consultando Supabase: {str(e)}")
-    return _DEMO_MATERIALES
+    return _MATERIALES_DEMO
 
 
 @app.get("/api/materiales/{id}", response_model=MaterialRespuesta, tags=["Materiales"])
 def obtener_material(id: int):
-    supabase = get_supabase()
+    supabase = obtener_supabase()
     if supabase:
         try:
             res = supabase.table("materiales").select("*").eq("id", id).single().execute()
@@ -106,64 +174,77 @@ def obtener_material(id: int):
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Material no encontrado: {str(e)}")
 
-    for mat in _DEMO_MATERIALES:
-        if mat["id"] == id:
-            return mat
+    for material in _MATERIALES_DEMO:
+        if material["id"] == id:
+            return material
     raise HTTPException(status_code=404, detail="Material no encontrado")
 
 
 @app.post("/api/materiales", response_model=MaterialRespuesta, status_code=status.HTTP_201_CREATED, tags=["Materiales"])
 def registrar_material(material: MaterialCrear):
-    supabase = get_supabase()
-    datos = dump_model(material)
+    supabase = obtener_supabase()
+    datos = volcar_modelo(material)
 
     if supabase:
         try:
             res = supabase.table("materiales").insert(datos).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
-            raise HTTPException(status_code=500, detail="No se pudo registrar el material en Supabase")
+            raise HTTPException(status_code=500, detail="No se pudo registrar el material")
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error insertando en Supabase: {str(e)}")
 
-    # Fallback local
-    nuevo_id = max([m["id"] for m in _DEMO_MATERIALES], default=0) + 1
-    registro = {
-        "id": nuevo_id,
-        "creado_en": datetime.utcnow(),
-        **datos
-    }
-    _DEMO_MATERIALES.append(registro)
+    # Respaldo en memoria
+    nuevo_id = max([m["id"] for m in _MATERIALES_DEMO], default=0) + 1
+    registro = {"id": nuevo_id, "creado_en": datetime.utcnow(), **datos}
+    _MATERIALES_DEMO.append(registro)
     return registro
 
 
+@app.delete("/api/materiales/{id}", tags=["Materiales"])
+def eliminar_material(id: int):
+    supabase = obtener_supabase()
+    if supabase:
+        try:
+            supabase.table("materiales").delete().eq("id", id).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error eliminando material: {str(e)}")
+    else:
+        _MATERIALES_DEMO[:] = [m for m in _MATERIALES_DEMO if m["id"] != id]
+    return {"mensaje": "Material eliminado correctamente"}
+
+
 # ========================================================
-# ENDPOINTS DE COTIZACIONES
+# COTIZACIONES
 # ========================================================
 
 @app.post("/api/cotizaciones", response_model=CotizacionRespuesta, status_code=status.HTTP_201_CREATED, tags=["Cotizaciones"])
 def crear_cotizacion(cotizacion: CotizacionCrear):
-    supabase = get_supabase()
-    material_data = None
+    supabase = obtener_supabase()
+    datos_material = None
 
-    # Obtener el precio por m2 del material para garantizar la integridad
+    # Se consulta el material para usar su precio real
     if supabase:
         try:
-            res_mat = supabase.table("materiales").select("*").eq("id", cotizacion.material_id).single().execute()
-            if not res_mat.data:
+            res_material = supabase.table("materiales").select("*").eq("id", cotizacion.material_id).single().execute()
+            if not res_material.data:
                 raise HTTPException(status_code=404, detail="El material indicado no existe")
-            material_data = res_mat.data
+            datos_material = res_material.data
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Error validando material: {str(e)}")
     else:
-        for mat in _DEMO_MATERIALES:
-            if mat["id"] == cotizacion.material_id:
-                material_data = mat
+        for material in _MATERIALES_DEMO:
+            if material["id"] == cotizacion.material_id:
+                datos_material = material
                 break
-        if not material_data:
+        if not datos_material:
             raise HTTPException(status_code=404, detail="El material indicado no existe")
 
-    precio_vigente = float(material_data["precio_m2"])
+    precio_vigente = float(datos_material["precio_m2"])
     precio_m2_registrado = cotizacion.precio_m2_registrado or precio_vigente
     total_estimado = round(cotizacion.metros_cuadrados * precio_m2_registrado, 2)
 
@@ -177,75 +258,92 @@ def crear_cotizacion(cotizacion: CotizacionCrear):
         "mensaje": cotizacion.mensaje,
         "estado": "Pendiente"
     }
+    if cotizacion.usuario_id:
+        datos["usuario_id"] = cotizacion.usuario_id
 
     if supabase:
         try:
             res = supabase.table("cotizaciones").insert(datos).execute()
             if res.data and len(res.data) > 0:
                 item = res.data[0]
-                item["material"] = material_data
+                item["material"] = datos_material
                 return item
             raise HTTPException(status_code=500, detail="No se pudo registrar la cotización")
+        except HTTPException:
+            raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error guardando cotización en Supabase: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error guardando cotización: {str(e)}")
 
-    nuevo_id = len(_DEMO_COTIZACIONES) + 1
     registro = {
-        "id": nuevo_id,
+        "id": len(_COTIZACIONES_DEMO) + 1,
         "creado_en": datetime.utcnow(),
-        "material": material_data,
+        "material": datos_material,
         **datos
     }
-    _DEMO_COTIZACIONES.append(registro)
+    _COTIZACIONES_DEMO.append(registro)
     return registro
 
 
 @app.get("/api/cotizaciones", response_model=List[CotizacionRespuesta], tags=["Cotizaciones"])
 def listar_cotizaciones():
-    supabase = get_supabase()
+    supabase = obtener_supabase()
     if supabase:
         try:
-            # Traer cotización con datos del material relacionado
+            # Incluye los datos del material relacionado
             res = supabase.table("cotizaciones").select("*, material:materiales(*)").order("creado_en", desc=True).execute()
             return res.data
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error consultando cotizaciones: {str(e)}")
+    return _COTIZACIONES_DEMO
 
-    return _DEMO_COTIZACIONES
+
+@app.patch("/api/cotizaciones/{cotizacion_id}/estado", tags=["Cotizaciones"])
+def actualizar_estado_cotizacion(cotizacion_id: int, datos: EstadoCotizacionSolicitud):
+    supabase = obtener_supabase()
+    if supabase:
+        try:
+            res = supabase.table("cotizaciones").update({"estado": datos.estado}).eq("id", cotizacion_id).execute()
+            return {"mensaje": "Estado actualizado", "datos": res.data}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error actualizando estado: {str(e)}")
+
+    for cotizacion in _COTIZACIONES_DEMO:
+        if cotizacion["id"] == cotizacion_id:
+            cotizacion["estado"] = datos.estado
+            return {"mensaje": "Estado actualizado", "datos": [cotizacion]}
+    raise HTTPException(status_code=404, detail="Cotización no encontrada")
 
 
 # ========================================================
-# ENDPOINT DE SUBIDA A SUPABASE STORAGE
+# SUBIDA DE FOTOS (SUPABASE STORAGE)
 # ========================================================
 
 @app.post(
     "/api/upload",
     tags=["Almacenamiento"],
-    summary="Subida de foto de placa a Supabase Storage",
-    description="Cuando la app toma la foto de la placa con la cámara, envía el archivo al backend. La API genera un identificador único (UUID), sube el archivo binario al bucket fotos-materiales y retorna la URL pública para asociarla automáticamente al registrar el material."
+    summary="Sube la foto de una placa",
+    description="Recibe la foto tomada con la cámara, la guarda en el bucket fotos-materiales y devuelve su URL pública."
 )
 async def subir_imagen(file: UploadFile = File(...)):
-    supabase = get_supabase()
-    nombre_archivo = f"{uuid.uuid4().hex}_{file.filename}"
+    supabase = obtener_supabase()
+    nombre_archivo = f"{uuid.uuid4().hex}_{file.filename or 'foto.jpg'}"
     contenido = await file.read()
 
     if supabase:
         try:
-            # Subir al bucket público 'fotos-materiales'
-            bucket_nombre = "fotos-materiales"
-            supabase.storage.from_(bucket_nombre).upload(
+            supabase.storage.from_(NOMBRE_BUCKET).upload(
                 file=contenido,
                 path=nombre_archivo,
                 file_options={"content-type": file.content_type or "image/jpeg"}
             )
-            public_url = supabase.storage.from_(bucket_nombre).get_public_url(nombre_archivo)
-            return {"foto_url": public_url, "archivo": nombre_archivo}
+            url_publica = supabase.storage.from_(NOMBRE_BUCKET).get_public_url(nombre_archivo)
+            return {"foto_url": url_publica, "archivo": nombre_archivo}
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error al subir archivo a Supabase Storage: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error al subir la foto: {str(e)}")
 
-    # En modo demo sin Supabase, retornamos una imagen representativa
+    # Sin Supabase se devuelve una imagen de muestra
     return {
         "foto_url": "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1000&q=80",
         "archivo": nombre_archivo,
-        "nota": "Modo local: se retornó URL de muestra. Configura SUPABASE_URL y SUPABASE_KEY para almacenamiento real."
+        "nota": "Modo demostración: URL de muestra."
     }
